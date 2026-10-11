@@ -30,29 +30,28 @@
   td.dim { color:var(--mute); }
   #msg { margin:10px 0; color:var(--mute); font-size:13px; }
   #msg.err { color:#c0392b; }
+  .sh { display:flex; align-items:center; gap:10px; margin:22px 0 8px; }
+  .sh h2 { font-size:16px; margin:0; font-weight:600; flex:1; }
   .note { margin-top:14px; color:var(--mute); font-size:13px; max-width:80ch; }
 </style>
 </head>
 <body>
 <main>
   <h1>MassLynx report parser</h1>
-  <p class="sub">Drop MassLynx / OpenLynx PDF reports to get retention time, area and ESI+ m/z for each peak. <span style="opacity:.6">v8: plain or scientific areas</span></p>
+  <p class="sub">Drop MassLynx / OpenLynx PDF reports to get retention time, area and ESI+ m/z for each peak. <span style="opacity:.6">v10: one section per peak table</span></p>
 
   <div id="drop" tabindex="0" role="button" aria-label="Choose PDF reports">Drop PDF reports here or click to choose</div>
   <input id="file" type="file" accept="application/pdf" multiple hidden>
   <p class="note"><a href="#" id="demo">Load demo data with many peaks</a></p>
   <div id="msg"></div>
-  <button id="dbg" hidden>Copy raw text for debugging</button>
+  <button id="dbg" hidden>Copy raw text for debugging</button> <button id="dbg2" hidden>Copy anonymised layout</button>
 
   <div class="bar" id="bar" hidden>
-    <label>UV channel <select id="chan"></select></label>
     <label>m/z match window (min) <input id="tol" type="number" min="0" max="0.5" step="0.01" value="0.05"></label>
     <label><input type="checkbox" id="share" checked> Let close peaks share one spectrum</label>
-    <button id="copy">Copy table</button>
-    <button id="csv">Download CSV</button>
   </div>
-  <div class="wrap" id="tw" hidden><table id="tbl"></table></div>
-  <p class="note" id="note" hidden>Tick Ignore to leave a peak out (noise, solvent front). The remaining peaks are rescaled so Area % sums to 100 for each file, and Copy and CSV export only the kept peaks. ESI+ m/z is the tallest labelled ion in the spectrum matching the peak's retention time; other labelled ions follow it.</p>
+  <div id="tables"></div>
+  <p class="note" id="note" hidden>Each peak table in the report (TAC, 254 nm, ELSD and so on) is shown separately. Tick Ignore to leave a peak out (noise, solvent front); the rest of that table is rescaled so Area % sums to 100, and Copy and CSV export only the kept peaks. ESI+ m/z is the tallest labelled ion in the spectrum matching the peak's retention time; other labelled ions follow it.</p>
 </main>
 
 <script>
@@ -67,12 +66,15 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.min.js";
 
 const SCI = /^-?\d+(\.\d+)?e[+-]\d+$/i;
 const NUM = /^-?\d+(\.\d+)?$/;
+const STRICT = /^\d+\s+(?:\S+\s+)*?\d+\.\d+\s+-?\d+(?:\.\d+)?(?:e[+-]?\d+)?\s+\d{1,3}\.\d+\s+\d+(?:\.\d+)?\s+-?\d+(?:\.\d+)?(?:e[+-]?\d+)?(?:\s|$)/i;   // peak, [name], time, area, area%, width, height
 const ANYNUM = /^-?\d+(\.\d+)?(e[+-]?\d+)?$/i;   // plain or scientific, e.g. 1234 or 1.23e+004
 
 /* pages: array of pages, each an array of text items {s, x, y} in content-stream order */
 function parseReport(pages) {
   const out = { file:"", date:"", uv:[], specs:[], hdr:0, bad:[], peakish:[] };
-  let channel = null, mode = null, spec = null;
+  let channel = null, mode = null, spec = null, tableChan = null, tableN = 0, lastPeak = 0;
+  // each peak table gets its own label: the detector title just before it, or "Table n" if none was recognised
+  const startTable = () => { tableChan = channel || ("Table " + (++tableN)); channel = null; lastPeak = 0; };
 
   for (const items of pages) {
     // Rebuild lines: consecutive items on one baseline, so chart axis labels at the same height do not join a table row
@@ -101,20 +103,22 @@ function parseReport(pages) {
       const lt = lineText.get(it);
       if ((m = lt.match(/UV Detector:\s*(\w+).*?\((\d+)\s*-\s*(\d+)\)/))) { channel = `UV ${m[1]} ${m[2]}-${m[3]} nm`; mode = null; continue; }
       if ((m = lt.match(/PDA Ch\d+\s+(\d+)\s*nm/))) { channel = `PDA ${m[1]} nm`; mode = null; continue; }
+      if (/\bELSD\b|\bELS\b|Evaporative/i.test(lt)) { channel = "ELSD"; mode = null; continue; }
       if ((m = lt.match(/^\d+:\s*(?:UV|PDA)[^()]*$/)) && !/Peak/.test(lt)) { channel = lt.replace(/\s+/g, " ").trim(); mode = null; continue; }
 
       if (/Peak/i.test(s) && !/^Peak (Number|ID)\b/.test(s) && out.peakish.length < 4) out.peakish.push(s.slice(0, 60));
-      if (/^Peak Number\b/.test(s)) { mode = "uv"; out.hdr++; continue; }
+      if (/^Peak Number\b/.test(s)) { mode = "uv"; out.hdr++; startTable(); continue; }
       if (/^Peak ID\b/.test(s)) { mode = "specHead"; spec = null; continue; }
 
-      if (mode === "uv") {
+      if (mode === "uv" || (firstSet.has(it) && STRICT.test(lineText.get(it)))) {   // second test finds rows even if the header wording differs
         // a table row arrives as one line: peak, [compound], time, area, area%, ...
         if (!firstSet.has(it)) continue;
         const t = lineText.get(it).split(" ");
         if (!/^\d+$/.test(t[0])) { if (/^(Time|m\/z)$/.test(s)) mode = null; continue; }
         const k = t.findIndex((v, i) => i >= 1 && /^\d+\.\d+$/.test(v) && ANYNUM.test(t[i + 1] || "") && /^\d+\.\d+$/.test(t[i + 2] || ""));
         if (k <= 0 && out.bad.length < 3) out.bad.push(t.join(" ").slice(0, 100));
-        if (k > 0) out.uv.push({ channel: channel || "UV (unnamed)", peak: +t[0], compound: t.slice(1, k).join(" "), rt: +t[k], area: t[k + 1], areaPct: +t[k + 2] });
+        if (k > 0) { if (mode !== "uv") { startTable(); mode = "uv"; } else if (+t[0] <= lastPeak && lastPeak > 0) startTable(); lastPeak = +t[0]; }
+        if (k > 0) out.uv.push({ channel: tableChan, peak: +t[0], compound: t.slice(1, k).join(" "), rt: +t[k], area: t[k + 1], areaPct: +t[k + 2] });
         continue;
       }
 
@@ -205,12 +209,8 @@ async function handle(files) {
     } catch (e) { errs.push(`${f.name}: could not be read`); }
   }
   msg.textContent = summary.join(" | ") + (errs.length ? "  Problems: " + errs.join("; ") : "");
-  $("dbg").hidden = !reports.length;
+  $("dbg").hidden = $("dbg2").hidden = !reports.length;
   if (errs.length) msg.className = "err";
-  const chans = [...new Set(reports.flatMap(r => r.uv.map(p => p.channel)))].filter(Boolean);
-  const cur = $("chan").value;
-  $("chan").innerHTML = chans.map(c => `<option>${c}</option>`).join("");
-  if (chans.includes(cur)) $("chan").value = cur;
   render();
 }
 
@@ -227,19 +227,28 @@ function adjust(rows, ign) {
   return rows;
 }
 
+const esc = s => String(s).replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
 function render() {
-  const rows = adjust(buildRows(reports, $("chan").value, +$("tol").value, $("share").checked), ignored);
-  const show = rows.length > 0;
-  $("bar").hidden = $("tw").hidden = $("note").hidden = !show;
-  $("tbl").innerHTML = "<thead><tr><th>Ignore</th>" + COLS.map(c => `<th class="${c[2]==='n'?'n':''}">${c[0]}</th>`).join("") + "</tr></thead><tbody>" +
-    rows.map(r => `<tr style="${r.ign ? 'opacity:.45;text-decoration:line-through' : ''}"><td><input type="checkbox" data-k="${r.key}" ${r.ign ? "checked" : ""} aria-label="Ignore peak ${r.peak}"></td>` +
-      COLS.map(c => `<td class="${c[2]||''}">${r[c[1]]}</td>`).join("") + "</tr>").join("") + "</tbody>";
-  window._rows = rows;
+  const chans = [...new Set(reports.flatMap(r => r.uv.map(p => p.channel)))];
+  const secs = [];
+  for (const ch of chans) {
+    const rows = adjust(buildRows(reports, ch, +$("tol").value, $("share").checked), ignored);
+    if (rows.length) secs.push({ ch, rows });
+  }
+  window._secs = secs;
+  $("bar").hidden = $("note").hidden = !secs.length;
+  $("tables").innerHTML = secs.map((s, i) =>
+    `<section><div class="sh"><h2>${esc(s.ch)}</h2><button data-act="copy" data-i="${i}">Copy table</button><button data-act="csv" data-i="${i}">Download CSV</button></div>` +
+    `<div class="wrap"><table><thead><tr><th>Ignore</th>${COLS.map(c => `<th class="${c[2]==='n'?'n':''}">${c[0]}</th>`).join("")}</tr></thead><tbody>` +
+    s.rows.map(r => `<tr style="${r.ign ? 'opacity:.45;text-decoration:line-through' : ''}"><td><input type="checkbox" data-k="${esc(r.key)}" ${r.ign ? "checked" : ""} aria-label="Ignore peak at ${esc(r.rt)} min"></td>` +
+      COLS.map(c => `<td class="${c[2]||''}">${esc(r[c[1]])}</td>`).join("") + "</tr>").join("") +
+    "</tbody></table></div></section>").join("");
 }
 
-function asText(sep) {   // exports kept peaks only
+function asText(rows, sep) {   // kept peaks only
   const q = v => sep === "," && /[",\n]/.test(v) ? `"${String(v).replace(/"/g, '""')}"` : v;
-  return [COLS.map(c => c[0]), ...window._rows.filter(r => !r.ign).map(r => COLS.map(c => r[c[1]]))].map(a => a.map(q).join(sep)).join("\n");
+  return [COLS.map(c => c[0]), ...rows.filter(r => !r.ign).map(r => COLS.map(c => r[c[1]]))].map(a => a.map(q).join(sep)).join("\n");
 }
 
 function demoReport() {
@@ -248,7 +257,8 @@ function demoReport() {
   const sci = v => v.toExponential(0).replace(/e\+(\d+)/, (m, d) => "e+" + d.padStart(3, "0"));
   const lab = a => a.map((m, i) => ({ mz: m, y: 500 - i * 30 }));
   return { file: "DEMO-001", date: "", raw: [],
-    uv: rt.map((t, i) => ({ channel: "UV TAC 210-400 nm", peak: i + 1, compound: "", rt: t, area: sci(pct[i] * 3500), areaPct: pct[i] })),
+    uv: rt.map((t, i) => ({ channel: "UV TAC 210-400 nm", peak: i + 1, compound: "", rt: t, area: sci(pct[i] * 3500), areaPct: pct[i] }))
+      .concat([[1.34, 95.2], [1.39, 4.8]].map(([t, v], i) => ({ channel: "PDA 254 nm", peak: i + 1, compound: "", rt: t, area: sci(v * 900), areaPct: v }))),
     specs: [[1.34, [399.5,462.5,379.4,641.5]], [2.10, [301.2,325.4]], [1.71, [287.3,311.2,355.4]], [0.88, [188.1]], [2.95, [512.6,534.5]]]
       .map(([t, m], i) => ({ id: i + 1, rt: t, pol: "+", labels: lab(m) })) };
 }
@@ -259,19 +269,38 @@ $("file").onchange = e => { handle([...e.target.files]); e.target.value = ""; };
 ["dragover","dragenter"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.add("over"); }));
 ["dragleave","drop"].forEach(ev => $("drop").addEventListener(ev, e => { e.preventDefault(); $("drop").classList.remove("over"); }));
 $("drop").addEventListener("drop", e => handle([...e.dataTransfer.files].filter(f => /pdf$/i.test(f.type) || /\.pdf$/i.test(f.name))));
-$("tbl").addEventListener("change", e => { const k = e.target.dataset && e.target.dataset.k; if (k) { e.target.checked ? ignored.add(k) : ignored.delete(k); render(); } });
-$("demo").onclick = e => { e.preventDefault(); reports.push(demoReport()); $("chan").innerHTML = "<option>UV TAC 210-400 nm</option>"; $("msg").className = ""; $("msg").textContent = "Demo data loaded (14 peaks)."; render(); };
-$("chan").onchange = $("tol").oninput = $("share").onchange = render;
+$("tables").addEventListener("change", e => { const k = e.target.dataset && e.target.dataset.k; if (k) { e.target.checked ? ignored.add(k) : ignored.delete(k); render(); } });
+$("demo").onclick = e => { e.preventDefault(); reports.push(demoReport()); $("msg").className = ""; $("msg").textContent = "Demo data loaded (14 peaks)."; render(); };
+$("tol").oninput = $("share").onchange = render;
 $("dbg").onclick = async () => {
   const t = reports.map(r => r.file + "\n" + r.raw.map((p, i) => "--- page " + (i + 1) + "\n" + p.map(o => `${Math.round(o.x)},${Math.round(o.y)}  ${o.s}`).join("\n")).join("\n")).join("\n\n");
   await navigator.clipboard.writeText(t); $("msg").className = ""; $("msg").textContent = "Raw text copied. Paste it into the chat.";
 };
-$("copy").onclick = async () => { await navigator.clipboard.writeText(asText("\t")); $("msg").className = ""; $("msg").textContent = "Table copied. Paste it into Excel."; };
-$("csv").onclick = () => {
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([asText(",")], { type: "text/csv" }));
-  a.download = "masslynx_peaks.csv"; a.click();
+$("dbg2").onclick = async () => {
+  const OK = new Set("peak number id compound time area areaabs total width height mass found not sample report continued page file name date flow rate column temperature printed ms es tic smooth mn uv detector pda ch tac wavelength range au nm min e m z".split(" "));
+  const mask = s => s.replace(/[A-Za-z]+/g, w => OK.has(w.toLowerCase()) ? w : "x").replace(/\d/g, "9");
+  const out = [];
+  for (const r of reports) r.raw.forEach((pg, i) => {
+    out.push(`--- page ${i + 1}: ${pg.length} items`);
+    const picks = new Set(pg.map((o, k) => /peak/i.test(o.s) && !/peak id/i.test(o.s) ? k : -1).filter(k => k >= 0));
+    const show = new Set(); if (i === 0) for (let k = 0; k < 20 && k < pg.length; k++) show.add(k);
+    picks.forEach(k => { for (let j = k; j < k + 36 && j < pg.length; j++) show.add(j); });
+    [...show].sort((a, b) => a - b).forEach(k => out.push(`${k}: ${Math.round(pg[k].x)},${Math.round(pg[k].y)}  ${mask(pg[k].s)}`));
+  });
+  await navigator.clipboard.writeText(out.join("\n")); $("msg").className = ""; $("msg").textContent = "Anonymised layout copied: digits and unfamiliar words are masked.";
 };
+$("tables").addEventListener("click", async e => {
+  const b = e.target.closest("button[data-act]"); if (!b) return;
+  const s = window._secs[+b.dataset.i];
+  if (b.dataset.act === "copy") {
+    await navigator.clipboard.writeText(asText(s.rows, "\t"));
+    $("msg").className = ""; $("msg").textContent = `${s.ch} table copied. Paste it into your ELN or Excel.`;
+  } else {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([asText(s.rows, ",")], { type: "text/csv" }));
+    a.download = "masslynx_" + s.ch.replace(/[^\w.-]+/g, "_") + ".csv"; a.click();
+  }
+});
 </script>
 </body>
 </html>

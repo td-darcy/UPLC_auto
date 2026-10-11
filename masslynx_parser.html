@@ -4,8 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>MassLynx report parser</title>
-<!-- If your work network blocks cdnjs, download these two files into the repo and change the paths. -->
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<!-- Local copies of pdf.js 3.11.174: keep pdf.min.js and pdf.worker.min.js in the same folder as this file. -->
+<script src="pdf.min.js"></script>
 <style>
   :root { --bg:#f6f8fa; --card:#fff; --ink:#14202b; --mute:#5b6b7a; --line:#d5dde5; --acc:#0b6e8a; --acc2:#e6f3f7; }
   @media (prefers-color-scheme: dark) { :root { --bg:#0f161d; --card:#17212b; --ink:#e6edf3; --mute:#8fa1b3; --line:#2a3947; --acc:#4cc3e0; --acc2:#13303a; } }
@@ -60,10 +60,10 @@ window.addEventListener("error", e => { const m = document.getElementById("msg")
 window.addEventListener("unhandledrejection", e => { const m = document.getElementById("msg"); m.className = "err"; m.textContent = "Error: " + (e.reason && e.reason.message || e.reason); });
 if (typeof pdfjsLib === "undefined") {
   document.getElementById("msg").className = "err";
-  document.getElementById("msg").textContent = "The PDF reader library did not load (probably blocked by your network). Save pdf.min.js and pdf.worker.min.js into the repo and point the two cdnjs paths at them.";
+  document.getElementById("msg").textContent = "The PDF reader file pdf.min.js was not found. Save pdf.min.js and pdf.worker.min.js (version 3.11.174) in the same folder as this page.";
   throw new Error("pdf.js missing");
 }
-pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+pdfjsLib.GlobalWorkerOptions.workerSrc = "pdf.worker.min.js";
 
 const SCI = /^-?\d+(\.\d+)?e[+-]\d+$/i;
 const NUM = /^-?\d+(\.\d+)?$/;
